@@ -424,3 +424,145 @@
         (ok rewards)
     )
 )
+
+;; PROTOCOL OPTIMIZATION & REBALANCING
+
+;; Automatic Protocol Rebalancing
+(define-private (rebalance-protocols)
+    (let
+        (
+            (total-allocations (fold + (map get-protocol-allocation (get-protocol-list)) u0))
+        )
+        (asserts! (<= total-allocations u10000) ERR-INVALID-AMOUNT)
+        (ok true)
+    )
+)
+
+;; Calculate Weighted Average APY Across All Protocols
+(define-private (get-weighted-apy)
+    (fold + (map get-weighted-protocol-apy (get-protocol-list)) u0)
+)
+
+;; Get Individual Protocol Weighted APY
+(define-private (get-weighted-protocol-apy (protocol-id uint))
+    (let
+        (
+            (protocol (unwrap-panic (get-protocol protocol-id)))
+            (allocation (get allocation (unwrap-panic 
+                (map-get? strategy-allocations { protocol-id: protocol-id }))))
+        )
+        (if (get active protocol)
+            (/ (* (get apy protocol) allocation) u10000)
+            u0
+        )
+    )
+)
+
+;; READ-ONLY FUNCTIONS
+
+;; Get Protocol Information
+(define-read-only (get-protocol (protocol-id uint))
+    (map-get? protocols { protocol-id: protocol-id })
+)
+
+;; Get User Deposit Information
+(define-read-only (get-user-deposit (user principal))
+    (map-get? user-deposits { user: user })
+)
+
+;; Get Total Value Locked
+(define-read-only (get-total-tvl)
+    (var-get total-tvl)
+)
+
+;; Check Token Whitelist Status
+(define-read-only (is-whitelisted (token <sip-010-trait>))
+    (default-to false (get approved (map-get? whitelisted-tokens { token: (contract-of token) })))
+)
+
+;; ADMINISTRATIVE FUNCTIONS
+
+;; Set Platform Fee Rate
+(define-public (set-platform-fee (new-fee uint))
+    (begin
+        (asserts! (is-contract-owner) ERR-NOT-AUTHORIZED)
+        (asserts! (<= new-fee u1000) ERR-INVALID-AMOUNT)
+        (var-set platform-fee-rate new-fee)
+        (ok true)
+    )
+)
+
+;; Emergency Shutdown Toggle
+(define-public (set-emergency-shutdown (shutdown bool))
+    (begin
+        (asserts! (is-contract-owner) ERR-NOT-AUTHORIZED)
+        (asserts! (not (is-eq shutdown (var-get emergency-shutdown))) ERR-INVALID-STATE)
+        (print { event: "emergency-shutdown", status: shutdown })
+        (var-set emergency-shutdown shutdown)
+        (ok true)
+    )
+)
+
+;; Add Token to Whitelist
+(define-public (whitelist-token (token <sip-010-trait>))
+    (begin
+        (asserts! (is-contract-owner) ERR-NOT-AUTHORIZED)
+        (let 
+            (
+                (token-contract (contract-of token))
+            )
+            (asserts! (not (is-whitelisted token)) ERR-ALREADY-WHITELISTED)
+            
+            ;; Validate token interface compliance
+            (try! (contract-call? token get-name))
+            (try! (contract-call? token get-symbol))
+            (try! (contract-call? token get-decimals))
+            (try! (contract-call? token get-total-supply))
+            
+            (map-set whitelisted-tokens { token: token-contract } { approved: true })
+            (print { event: "token-whitelisted", token: token-contract })
+            (ok true)
+        )
+    )
+)
+
+;; UTILITY HELPER FUNCTIONS
+
+;; Get List of Active Protocol IDs
+(define-private (get-protocol-list)
+    (list u1 u2 u3 u4 u5)
+)
+
+;; Get Protocol Allocation Percentage
+(define-private (get-protocol-allocation (protocol-id uint))
+    (get allocation (default-to { allocation: u0 }
+        (map-get? strategy-allocations { protocol-id: protocol-id })))
+)
+
+;; Rate Limiting Check
+(define-private (check-rate-limit (user principal))
+    (let ((user-ops (default-to { last-operation: u0, count: u0 }
+            (map-get? user-operations { user: user }))))
+        (asserts! (or
+            (> stacks-block-height (+ (get last-operation user-ops) u144))
+            (< (get count user-ops) u10)
+        ) ERR-RATE-LIMITED)
+        (ok true)
+    )
+)
+
+;; Update User Rate Limit Counters
+(define-private (update-rate-limit (user principal))
+    (let ((user-ops (default-to { last-operation: u0, count: u0 }
+            (map-get? user-operations { user: user }))))
+        (map-set user-operations
+            { user: user }
+            {
+                last-operation: stacks-block-height,
+                count: (if (> stacks-block-height (+ (get last-operation user-ops) u144))
+                    u1
+                    (+ (get count user-ops) u1))
+            }
+        )
+    )
+)
